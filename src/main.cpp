@@ -1,6 +1,16 @@
 #include <Arduino.h>
 #include "NeuralNetwork.h"
-#include "esp_camera.h"
+
+#include <WebServer.h>
+#include <WiFi.h>
+#include <esp32cam.h>
+
+const char *WIFI_SSID = "DSL_2640NRU";
+const char *WIFI_PASS = "";
+
+WebServer server(80);
+
+static auto loRes = esp32cam::Resolution::find(320, 240);
 
 NeuralNetwork *nn;
 /*
@@ -34,6 +44,8 @@ unsigned char input_vector[] =
    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0};
 */
+
+/*
 static camera_config_t camera_config = {
     // ... other parameters
 
@@ -42,84 +54,129 @@ static camera_config_t camera_config = {
     .pixel_format = PIXFORMAT_GRAYSCALE,
     .frame_size = FRAMESIZE_QVGA,
     .fb_count = 1 
-};
+};*/
 
-void crop_image(camera_fb_t *fb, unsigned short cropLeft, unsigned short cropRight, unsigned short cropTop, unsigned short cropBottom)
+float current_count_value;
+const int freq = 12000;
+const int ledChannel = 0;
+const int resolution = 8;
+
+void handleIndex()
+{  
+}
+void handleSettings()
+{  
+}
+void handleMetrics()
 {
-    unsigned int maxTopIndex = cropTop * fb->width ;
-    unsigned int minBottomIndex = ((fb->width*fb->height) - (cropBottom * fb->width));
-    unsigned short maxX = fb->width - cropRight; // In pixels
-    unsigned short newWidth = fb->width - cropLeft - cropRight;
-    unsigned short newHeight = fb->height - cropTop - cropBottom;
-    size_t newJpgSize = newWidth * newHeight;
+  String content = "# ESP32 AI thinker some meter counter recognized by TesorFlow\nsmeter_counter{type=\"hwater\"} " + String(current_count_value, 3) ;
+  server.setContentLength(content.length());
+  server.send(200, "text/plain");
+  WiFiClient client = server.client();
+  client.println(content);
+  client.flush();
+}
 
-    unsigned int writeIndex = 0;
-    // Loop over all bytes
-    for(int i = 0; i < fb->len; i+=2){
-        // Calculate current X, Y pixel position
-        int x = (i/2) % fb->width;
+void handleBmp()
+{
+  if (!esp32cam::Camera.changeResolution(loRes)) {
+    Serial.println("SET-LO-RES FAIL");
+  }
+  
+  //ledcWrite(ledChannel, 10);
+  //digitalWrite(4,HIGH);
+  //delay(250);
+  //digitalWrite(4,LOW);
+  //delay(20);
+  auto frame = esp32cam::capture();
+  //ledcWrite(ledChannel, 0);
+  if (frame == nullptr) {
+    Serial.println("CAPTURE FAIL");
+    server.send(503, "", "CAPTURE FAIL");
+    return;
+  }
+  Serial.printf("CAPTURE OK %dx%d %db\n", frame->getWidth(), frame->getHeight(),
+                static_cast<int>(frame->size()));
 
-        // Crop from the top
-        if(i < maxTopIndex){ continue; }
+  if (!frame->toBmp()) {
+    Serial.println("CONVERT FAIL");
+    server.send(503, "", "CONVERT FAIL");
+    return;
+  }
+  Serial.printf("CONVERT OK %dx%d %db\n", frame->getWidth(), frame->getHeight(),
+                static_cast<int>(frame->size()));
 
-        // Crop from the bottom
-        if(i > minBottomIndex){ continue; }
-
-        // Crop from the left
-        if(x <= cropLeft){ continue; }
-
-        // Crop from the right
-        if(x > maxX){ continue; }
-
-        // If we get here, keep the pixels
-        fb->buf[writeIndex++] = fb->buf[i];
-    }
-
-    // Set the new dimensions of the framebuffer for further use.
-    fb->width = newWidth;
-    fb->height = newHeight;
-    fb->len = newJpgSize;
+  server.setContentLength(frame->size());
+  server.send(200, "image/bmp");
+  WiFiClient client = server.client();
+  frame->writeTo(client);
 }
 
 void setup()
 {
+  ledcSetup(ledChannel, freq, resolution);
+  ledcAttachPin(4, ledChannel);
+  ledcWrite(ledChannel, 0);
   Serial.begin(115200);
+  //pinMode(4, OUTPUT);
   nn = new NeuralNetwork();
 
+  {
+    using namespace esp32cam;
+    Config cfg;
+    cfg.setPins(pins::AiThinker);
+    cfg.setResolution(loRes);
+    cfg.setBufferCount(2);
+    cfg.setGrayscale();
+
+    bool ok = Camera.begin(cfg);
+    Serial.println(ok ? "CAMERA OK" : "CAMERA FAIL");
+  }
+
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+  }
+
+  Serial.print("http://");
+  Serial.println(WiFi.localIP());
+  Serial.println("  /");
+  Serial.println("  /settings");
+  Serial.println("  /cam.bmp");
+  Serial.println("  /metrics");
+
+  server.on("/", handleIndex);  
+  server.on("/cam.bmp", handleBmp);
+  server.on("/settings", handleSettings);
+  server.on("/metrics", handleMetrics);
+  
+  server.begin();
   Serial.printf("Setup finished\n");
 }
 
 void loop()
 {
 
+
+  server.handleClient();
+
+  current_count_value+=0.01f;
+ 
+ /*
   Serial.printf("start loop \n");
-
-// Take picture
-printf("Taking picture...\n");
-camera_fb_t *fb = esp_camera_fb_get();
-if(!fb) {
-    printf("Could not take picture \n");
-    // Handle error
-}
-
-  printf("Picture taken: %d bytes \n", fb->len);
-
-  // Crop image (frame buffer, cropLeft, cropRight, cropTop, cropBottom)
-  // 320x240
-  int w=320, h=240, sx=100,sy=130,cw=28,ch=28;
-  crop_image(fb, sx, sy, w-(cw+sx), h-(ch+sy));
-
-
 
   for (size_t i = 0; i < 784; i++)
   {
-    Serial.printf("4d%",fb->buf[i]);
-    if(i%28==0){      
-    Serial.printf("\n");
+    //Serial.printf("4d%", fb->buf[i]);
+    if (i % 28 == 0)
+    {
+      Serial.printf("\n");
     }
-    nn->getInputBuffer()[i] = fb->buf[i];
+    //nn->getInputBuffer()[i] = fb->buf[i];
   }
-    Serial.printf("\n");
+  Serial.printf("\n");
 
   Serial.printf("input buffer is set \n");
 
@@ -128,8 +185,9 @@ if(!fb) {
   for (int i = 0; i < 10; i++)
   {
     float result = nn->result(i);
-    Serial.printf("Out index %d, Predicted %.6f\n",i, result);
+    Serial.printf("Out index %d, Predicted %.6f\n", i, result);
   }
 
   delay(1000);
+  */
 }
